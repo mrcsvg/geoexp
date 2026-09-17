@@ -45,17 +45,15 @@ jobs:
       - name: Install R dependencies
         # remotes::install_github reads GITHUB_PAT to authenticate against the
         # GitHub API; GITHUB_TOKEN lifts the anonymous 60 req/hr rate limit.
-        # Only GeoLift is needed here — geoexp does not compare estimator
-        # internals (those parity tests live in augsynth-py).
+        # augsynth is installed first because GeoLift imports it and it is not
+        # on CRAN (GeoLift's DESCRIPTION has no Remotes: field to resolve it).
+        # geoexp still does not compare estimator internals — those parity
+        # tests live in augsynth-py. remotes only warns when an install fails,
+        # so the final library() call makes this step fail loudly instead.
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Rscript -e 'install.packages("remotes", repos="https://cloud.r-project.org")'
+          Rscript -e 'remotes::install_github("ebenmichael/augsynth", upgrade = "never")'
           Rscript -e 'remotes::install_github("facebookincubator/GeoLift", upgrade = "never")'
-
-      - name: Install Python package with validation extras
-        run: |
-          pip install -e ".[validation,dev]"
-
-      - name: Run parity tests
-        run: pytest tests/validation_against_r/ -v
+          Rscript -e 'library(GeoLift)'

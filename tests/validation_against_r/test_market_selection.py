@@ -34,7 +34,7 @@ from augsynth_py import Synth
 
 from geoexp import rank_designs
 
-from .conftest import ALPHA, DURATION, EFFECT_SIZES, LOOKBACK_WINDOW, NS
+from .conftest import ALPHA, DURATION, EFFECT_SIZES, LOOKBACK_WINDOW, NS, child_safe_env
 
 pytestmark = [pytest.mark.requires_r, pytest.mark.slow]
 
@@ -53,7 +53,9 @@ MAX_NOISE_RATIO = 3.0
 
 def _curves(panel: pl.DataFrame, candidates: list[str], seed: int) -> pl.DataFrame:
     """geoexp power curves for the given candidates at one seed."""
-    with warnings.catch_warnings():
+    # child_safe_env: n_jobs=-1 spawns Python subprocesses, and embedded R has
+    # rewritten LD_LIBRARY_PATH by now -- see the context manager's docstring.
+    with warnings.catch_warnings(), child_safe_env():
         # lookback_window is 10 here, above the warning threshold; guard anyway
         # so an unrelated warning cannot fail the suite under -W error.
         warnings.simplefilter("ignore", UserWarning)

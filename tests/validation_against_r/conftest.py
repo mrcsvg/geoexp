@@ -7,12 +7,60 @@ Requires R >= 4.5 and the GeoLift R package; see
 
 from __future__ import annotations
 
+import contextlib
+import os
+from collections.abc import Iterator
+
 import polars as pl
 import pytest
 
 pytest.importorskip("rpy2")
 
 from ._r_frames import from_r_data_frame
+
+#: ``LD_LIBRARY_PATH`` as it was before embedded R had a chance to rewrite it.
+#: Captured at import time: ``pytest.importorskip`` above loads the ``rpy2``
+#: package but not ``rpy2.robjects``, so R is still uninitialized here.
+_LD_LIBRARY_PATH_BEFORE_R = os.environ.get("LD_LIBRARY_PATH")
+
+
+@contextlib.contextmanager
+def child_safe_env() -> Iterator[None]:
+    """Restore the pre-R ``LD_LIBRARY_PATH`` while Python subprocesses are spawned.
+
+    Initializing embedded R sources ``$R_HOME/etc/ldpaths``, which rewrites
+    ``LD_LIBRARY_PATH`` in this process to put R's own library directories --
+    and, on a Linux runner, ``/usr/lib/x86_64-linux-gnu`` -- *ahead* of the
+    Python installation's ``lib``. Every Python child spawned afterwards
+    inherits that, so the dynamic loader hands it the system
+    ``libpython3.12.so.1.0`` instead of the one belonging to the interpreter
+    being launched. The child then computes a different set of site directories
+    and comes up without ``site-packages``: joblib's loky workers die at
+    bootstrap with ``ModuleNotFoundError: No module named 'joblib'`` and
+    ``rank_designs(n_jobs=-1)`` fails with ``TerminatedWorkerError``.
+
+    Measured on ubuntu-latest: under R's value ``ldd`` resolves the child's
+    ``libpython3.12.so.1.0`` to ``/usr/lib/x86_64-linux-gnu``; restoring the
+    original value puts ``site-packages`` back and ``Parallel`` runs.
+
+    The restore is scoped to the spawn rather than made permanent because R
+    still needs its own value to ``dlopen`` package libraries: nothing calls
+    into R inside this block.
+    """
+    during_r = os.environ.get("LD_LIBRARY_PATH")
+    _set_ld_library_path(_LD_LIBRARY_PATH_BEFORE_R)
+    try:
+        yield
+    finally:
+        _set_ld_library_path(during_r)
+
+
+def _set_ld_library_path(value: str | None) -> None:
+    if value is None:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+    else:
+        os.environ["LD_LIBRARY_PATH"] = value
+
 
 #: Design shared by both sides of every parity assertion. lookback_window is
 #: deliberately well above 1: at 1 the power of a cell is a single 0/1 outcome

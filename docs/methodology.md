@@ -34,6 +34,26 @@ Contract patterns this imposes, all documented in `simulate_power`'s Notes:
 one child generator per candidate via `rng.spawn`; parallelism across
 candidates with `n_jobs=1` passed down, because joblib does not nest workers.
 
+## Units are panel units; "market" is inherited vocabulary
+
+Nothing in the implementation is geographic. `rank_designs` takes a `panel`
+and the *name* of its unit column; the units may be cities, stores, schools,
+hospitals or firms. "Market" throughout this package, and `cpic`
+(cost per incremental conversion), come from R GeoLift, whose reporting shape
+geoexp mirrors. `cpic` is arithmetically a cost per unit of outcome; only its
+name is marketing's.
+
+What *is* load-bearing is the direction in time. geoexp ranks designs that have
+not been run: it assumes the caller chooses which units are treated and for how
+long. A treatment that already happened, with a treated set nobody chose, is an
+estimation problem rather than a design problem and belongs to augsynth-py.
+Retrospective policy evaluation is where synthetic control started, and is what
+Abadie 2021 surveys.
+
+The parity suite runs on `GeoLift_PreTest`, a marketing panel. The estimator
+and the power simulation assume nothing about the domain, but no non-marketing
+panel is measured anywhere in this repository.
+
 ## `mde` is a geoexp construct, not GeoLift's `Average_MDE`
 
 **This is the most important thing on this page.** The `mde` column is not

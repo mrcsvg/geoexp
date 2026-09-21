@@ -78,6 +78,28 @@ selection is 0.2.x; multi-cell designs are 0.3.x+.
 `enumerate_candidates` is a convenience, not a gate — `rank_designs` takes any
 list of sets, so bring your own candidates if you prefer.
 
+## Not only marketing
+
+The API assumes no geography: `rank_designs` takes a panel and the *name* of
+its unit column, so the units can be cities, stores, schools, hospitals or
+firms. "Market" here is vocabulary inherited from R GeoLift, whose reporting
+shape this package mirrors, and `cpic` is arithmetically a cost per unit of
+outcome — only its name is marketing's.
+
+A public-policy pilot is the same question in different clothes: *which
+municipalities should receive the program, and for how long, to detect a 5%
+effect?* That is `rank_designs` unchanged.
+
+What does not fit is the retrospective question — *did the policy that already
+happened work?* — where you never chose the treated set. That is estimation
+rather than design, so it belongs to
+[augsynth-py](https://github.com/mrcsvg/augsynth-py) instead. Retrospective
+policy evaluation is in fact where synthetic control started.
+
+One caveat, stated rather than buried: the parity suite runs on
+`GeoLift_PreTest`, a marketing panel, so every number quoted in these docs was
+measured on marketing data. Nothing here measures a non-marketing panel.
+
 ## Validation
 
 Every feature with a reproducible R `GeoLiftMarketSelection` counterpart is

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-20
+
 ### Added
 
 - **Public API for single-cell market selection** (project milestone v0.5),
@@ -54,3 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI workflows (lint/type/unit + min-deps, GeoLift validation, tag-triggered
   PyPI trusted publishing), and placeholder `selection` module. No public
   API yet — that lands with the v0.5 design doc.
+
+[Unreleased]: https://github.com/mrcsvg/geoexp/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mrcsvg/geoexp/releases/tag/v0.1.0

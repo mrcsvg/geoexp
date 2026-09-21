@@ -114,8 +114,6 @@ held throughout: the R GeoLift source was never read.
 
 ## Install
 
-Not yet published. Once released:
-
 ```bash
 pip install geoexp
 ```

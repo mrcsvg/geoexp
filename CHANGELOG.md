@@ -8,7 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- Docs: the README and `docs/methodology.md` now state that `unit` is any
+  panel unit and that "market" and `cpic` are vocabulary inherited from R
+  GeoLift, with the prospective/retrospective boundary against augsynth-py
+  spelled out. No code change.
 
 ## [0.1.0] - 2026-09-20
 

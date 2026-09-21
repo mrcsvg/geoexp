@@ -57,3 +57,10 @@ jobs:
           Rscript -e 'remotes::install_github("ebenmichael/augsynth", upgrade = "never")'
           Rscript -e 'remotes::install_github("facebookincubator/GeoLift", upgrade = "never")'
           Rscript -e 'library(GeoLift)'
+
+      - name: Install Python package with validation extras
+        run: |
+          pip install -e ".[validation,dev]"
+
+      - name: Run parity tests
+        run: pytest tests/validation_against_r/ -v

@@ -16,10 +16,14 @@ never translated.
 | Candidate ranking | geoexp construct, see below | `selection._apply_ranking` |
 | Interpolated MDE | geoexp construct, see below | `selection._interp_mde` |
 | Treated share / holdout | panel arithmetic | `selection._summarize` |
-| Investment (`cpic`) | `cpic × effect_size × Σ Y_treated` over the treatment window | `selection._summarize` |
+| Investment (`cpic`) | `cpic × effect_size × Σ Y_treated`, averaged over the lookback windows | `selection._lookback_treated_y` |
+| Investment at the MDE | same, at `mde_grid` | `selection._summarize` |
 | Candidate enumeration | correlation criterion, see below | `enumerate_candidates` |
 | Null bias / H1 calibration | see below | `selection._summarize` |
-| Budget-constrained selection | GeoLift methodology publications | 0.2.x |
+| Budget-constrained selection | GeoLift's `budget`, measured (characterization §11) | `rank_designs(budget=)`, `DesignRanking.within_budget` |
+| Panel preparation | GeoLift's `GeoDataRead`, measured (characterization §10) | `prepare_panel` |
+| Unit hierarchies | geoexp construct, see below | `Hierarchy`, `aggregate_panel` |
+| Design plots | presentation of the above | `DesignRanking.fit_path`, `plot_power`, `plot_fit` |
 
 ## The power layer is borrowed, not reimplemented
 
@@ -133,6 +137,82 @@ separate only when the bias depends on the effect size. Read
 `h1_calibration_error` as a confirmation that the bias is effect-independent,
 not as a second independent signal.
 
+## Budget-constrained selection
+
+A design's cost is what it takes to run the test at the lift it can detect:
+`investment_mde = cpic × mde_grid × Σ Y_treated`, with the treated sum averaged
+over the lookback windows. This is R GeoLift's `Investment` exactly, and the
+parity suite asserts it.
+
+Why `mde_grid` and not the interpolated `mde`: the grid point is never below
+the interpolated one, so the cost is an **upper bound**. A design that fits the
+budget can afford the lift it is able to detect; pricing at the interpolated
+value would admit designs that cannot. A design with no MDE on the grid has no
+defined cost and never fits a budget.
+
+`budget` drops what does not fit and re-ranks the rest, as GeoLift does.
+`within_budget` re-applies a different budget to the unfiltered ranking, so
+exploring budgets costs nothing.
+
+The `investment` column (at `target_effect_size`) answers a different
+question — what testing a fixed lift would cost — and is kept unchanged. Both
+columns were priced at the last window only in 0.1.0, which matches GeoLift
+only at `lookback_window = 1`; that was a bug, fixed in 0.2.0.
+
+## Panel preparation
+
+`prepare_panel` reproduces `GeoDataRead` as measured from its outputs
+(characterization §10): lower-cased unit names, duplicates summed, units not
+observed in every period dropped. Two differences are deliberate. It **says**
+what it dropped and why — GeoLift reports only a count in an optional summary
+— and it keeps real dates unless asked for the integer index, because
+`rank_designs` accepts dates.
+
+The period universe is every period observed for any unit, so a date missing
+for *every* unit is not detected; a calendar gap like that is invisible to
+any rule that does not know the intended frequency.
+
+String times are parsed as datetimes and narrowed to dates only when every
+value is midnight, so hourly data is never truncated into summed "duplicates".
+A null time is an error: a row with no period has nowhere to go.
+
+`every` aggregates over time by summing, and drops partial periods at either
+edge. An edge period is partial when the data's own frequency leaves room for
+an earlier (first period) or later (last period) observation inside it. The
+base frequency is inferred calendar-aware — monthly data is 28 to 31 days
+apart and only "one month" describes every gap — so a whole February, or a
+December at the end of monthly data, is not mistaken for a partial period. A
+null anywhere in a sum keeps the sum null, so a missing value can never hide
+inside an aggregate.
+
+## Unit hierarchies
+
+A `Hierarchy` records which coarser units each fine unit belongs to.
+Nesting is **not** assumed: whether one level can be aggregated into another is
+checked per direction, and fails if any source value maps to more than one
+target. That admits hierarchies that do not nest (media markets crossing state
+lines) and rejects exactly the aggregations that would double-count.
+
+Labels are usable only where they identify units: a label naming two codes
+(homonymous regions) is refused rather than summed under one name.
+
+`aggregate_panel` only sums. Rates are not summable; aggregate numerator and
+denominator as two outcomes and divide afterwards. Ready-made hierarchies (the
+IBGE division first) ship in the companion package `geoexp-units`, built on
+the same public `Hierarchy.from_frame` any user can call.
+
+## Design plots
+
+`fit_path` fits a **copy** of the prototype estimator with the simulated test
+in the last `duration` periods — the most recent window the power simulation
+evaluated — and returns actual, synthetic and gap per period. It reads the
+fitted `periods_`, `actual_` and `synthetic_` attributes, which `Synth` and
+`AugSynth` document but the `PowerEstimator` protocol does not require; an
+estimator without them gets a `TypeError` saying so. `plot_power` draws the
+parity-tested power curves; `plot_fit` draws `fit_path`. Colours come from a
+fixed categorical order checked for colour-vision-deficiency separation, and
+every series is also named in a legend.
+
 ## Ranking criteria
 
 Default order: `mde` ascending, then `empirical_size`, then `rmspe_pre`, then
@@ -161,10 +241,13 @@ covered by unit tests rather than parity tests.
 |---|---|
 | `mde` | GeoLift's `Average_MDE` derivation is not in published material; and rank order by MDE is not stable across implementations |
 | `rank` | Composite over `mde`; inherits the above |
+| `prepare_panel(every=, on_incomplete="fill_zero")` | `GeoDataRead` has no counterpart |
+| `Hierarchy`, `aggregate_panel` | GeoLift has no unit hierarchy |
+| `fit_path`, `plot_power`, `plot_fit` | Presentation of quantities validated elsewhere |
 
 Every other public column is either asserted against the oracle
-(`power`, `att`, `investment`) or is panel arithmetic with no oracle
-counterpart to disagree with.
+(`power`, `att`, `investment_mde`, the budget filter, `prepare_panel`) or is
+panel arithmetic with no oracle counterpart to disagree with.
 
 ## References
 

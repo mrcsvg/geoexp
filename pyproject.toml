@@ -45,6 +45,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+plot = [
+    # DesignRanking.plot_power / plot_fit. Imported lazily, so the core package
+    # never needs it; a missing install raises an ImportError naming this extra.
+    "matplotlib>=3.8",
+]
 validation = [
     # Required to run tests/validation_against_r/ (GeoLift parity oracle).
     # Also requires R (>=4.5) and the GeoLift R package installed on the

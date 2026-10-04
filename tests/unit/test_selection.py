@@ -428,3 +428,164 @@ def test_h1_calibration_error_is_null_for_additive_effects() -> None:
     res = _rank(effect_type="additive", effect_sizes=(0.0, 50.0, 100.0))
 
     assert res.ranking.get_column("h1_calibration_error").null_count() == res.ranking.height
+
+
+def test_rank_designs_treatment_window_works_on_a_date_time_column() -> None:
+    # prepare_panel keeps real dates by default and augsynth-py accepts them, so
+    # the treatment window must be "the last `duration` periods", not integer
+    # arithmetic on the time column.
+    import datetime as dt
+
+    import polars as pl
+
+    base = _rank(cpic=1.0).ranking
+    dated = _synthetic_panel().with_columns(
+        pl.lit(dt.date(2021, 1, 1)).add(pl.duration(days=pl.col("t"))).alias("t")
+    )
+    import numpy as np
+    from augsynth_py import Synth
+
+    from geoexp.selection import rank_designs
+
+    with pytest.warns(UserWarning, match="lookback_window"):
+        res = rank_designs(
+            dated,
+            estimator=Synth(),
+            unit="loc",
+            time="t",
+            outcome="y",
+            candidates=[{"u1"}, {"u2", "u3"}],
+            durations=[3],
+            effect_sizes=(0.0, 0.1, 0.2),
+            lookback_window=2,
+            ns=50,
+            permutation_type="iid",
+            rng=np.random.default_rng(11),
+            cpic=1.0,
+        )
+
+    cols = ["candidate", "proportion_total_y", "investment"]
+    assert res.ranking.sort("candidate").select(cols).equals(base.sort("candidate").select(cols))
+
+
+def test_investment_mde_prices_the_grid_mde_on_the_treatment_window() -> None:
+    # investment is cpic x target_effect_size x sum(Y_treated); investment_mde
+    # swaps target_effect_size for mde_grid --- exactly GeoLift's Investment.
+    import polars as pl
+
+    r = _rank(cpic=2.0, target_effect_size=0.1).ranking
+    treated_y = pl.col("investment") / (2.0 * 0.1)
+    expected = (
+        pl.when(pl.col("mde_grid").is_null())
+        .then(None)
+        .otherwise(2.0 * pl.col("mde_grid") * treated_y)
+    )
+    diff = r.select((pl.col("investment_mde") - expected).abs().max()).item()
+    assert diff is None or diff < 1e-9
+    assert r.get_column("investment_mde").null_count() == r.get_column("mde_grid").null_count()
+
+
+def test_investment_mde_is_absent_without_cpic() -> None:
+    assert "investment_mde" not in _rank().ranking.columns
+
+
+def test_budget_requires_cpic() -> None:
+    import numpy as np
+    from augsynth_py import Synth
+
+    from geoexp.selection import rank_designs
+
+    with pytest.raises(ValueError, match="cpic"):
+        rank_designs(
+            _synthetic_panel(),
+            estimator=Synth(),
+            unit="loc",
+            time="t",
+            outcome="y",
+            candidates=[{"u1"}],
+            durations=[3],
+            rng=np.random.default_rng(0),
+            budget=100.0,
+        )
+
+
+def _budgets():
+    """Full ranking with cpic, plus a budget that keeps some rows but not all."""
+    full = _rank(cpic=1.0, durations=[3, 5])
+    costs = sorted(c for c in full.ranking.get_column("investment_mde").to_list() if c is not None)
+    assert len(costs) >= 2, "fixture must price at least two designs"
+    return full, costs
+
+
+def test_budget_keeps_only_designs_whose_mde_cost_fits_and_reranks() -> None:
+    _full, costs = _budgets()
+    budget = costs[0]
+    res = _rank(cpic=1.0, durations=[3, 5], budget=budget)
+
+    kept = res.ranking
+    assert kept.height == sum(c <= budget for c in costs)
+    assert (kept.get_column("investment_mde") <= budget).all()
+    assert kept.get_column("rank").min() == 1
+    assert res.budget == budget
+
+
+def test_within_budget_can_loosen_as_well_as_tighten() -> None:
+    full, costs = _budgets()
+    tight = full.within_budget(costs[0])
+    loose = tight.within_budget(costs[-1])
+
+    assert tight.ranking.height < loose.ranking.height
+    assert loose.ranking.height == len(costs)
+
+
+def test_within_budget_warns_with_the_cheapest_cost_when_nothing_fits() -> None:
+    full, costs = _budgets()
+    with pytest.warns(UserWarning, match="cheapest"):
+        res = full.within_budget(costs[0] / 2)
+    assert res.ranking.height == 0
+
+
+def test_power_results_survive_the_budget_filter() -> None:
+    from augsynth_py import PowerResults
+
+    full, costs = _budgets()
+    with pytest.warns(UserWarning, match="cheapest"):
+        res = full.within_budget(costs[0] / 2)
+    assert isinstance(res.power("u1", 3), PowerResults)
+
+
+def test_within_budget_requires_a_ranking_priced_with_cpic() -> None:
+    with pytest.raises(ValueError, match="cpic"):
+        _rank().within_budget(100.0)
+
+
+def test_investment_averages_treated_outcome_over_the_lookback_windows() -> None:
+    # GeoLift prices a design at the mean, over the lookback windows, of the
+    # treated outcome summed over each simulated test window (windows ending at
+    # T, T-1, ..., T-L+1). Measured exact to the cent in the characterization.
+    import polars as pl
+
+    panel = _synthetic_panel()
+    duration, lookback = 3, 2
+    treated = panel.filter(pl.col("loc") == "u1")
+    sums = [
+        treated.filter(pl.col("t").is_between(end - duration + 1, end)).get_column("y").sum()
+        for end in (30, 29)
+    ]
+    expected_y = sum(sums) / lookback
+
+    row = (
+        _rank(cpic=1.0, target_effect_size=0.1, lookback_window=lookback)
+        .ranking.filter(pl.col("candidate") == "u1")
+        .row(0, named=True)
+    )
+    assert row["investment"] == pytest.approx(0.1 * expected_y)
+    if row["mde_grid"] is not None:
+        assert row["investment_mde"] == pytest.approx(row["mde_grid"] * expected_y)
+
+
+@pytest.mark.parametrize("budget", [float("nan"), float("inf"), -1.0])
+def test_within_budget_rejects_a_budget_that_is_not_a_finite_non_negative_number(budget) -> None:
+    full, _costs = _budgets()
+    with pytest.raises(ValueError, match="budget"):
+        full.within_budget(budget)

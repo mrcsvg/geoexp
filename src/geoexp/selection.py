@@ -20,11 +20,13 @@ Parity oracle: R ``GeoLiftMarketSelection``, driven via rpy2 in
 
 from __future__ import annotations
 
+import copy
 import itertools
+import math
 import warnings
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import polars as pl
@@ -36,6 +38,11 @@ from augsynth_py import (
     simulate_power,
 )
 from joblib import Parallel, delayed
+
+from geoexp import _plotting
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 # augsynth_py exports EffectType but not these two: they live in
 # augsynth_py.inference and are absent from augsynth_py.__all__. The
@@ -191,6 +198,19 @@ def _apply_ranking(ranking: pl.DataFrame) -> pl.DataFrame:
 
 
 @dataclass(frozen=True)
+class _Context:
+    """What :func:`rank_designs` was called with, kept for the plot methods."""
+
+    panel: pl.DataFrame
+    estimator: PowerEstimator
+    unit: str
+    time: str
+    outcome: str
+    target_power: float
+    alpha: float
+
+
+@dataclass(frozen=True)
 class DesignRanking:
     """Result of :func:`rank_designs`.
 
@@ -206,7 +226,215 @@ class DesignRanking:
 
     ranking: pl.DataFrame
     candidates: dict[str, tuple[Any, ...]]
+    budget: float | None = None
     _results: dict[str, PowerResults] = field(repr=False, default_factory=dict)
+    _unfiltered: pl.DataFrame | None = field(repr=False, default=None)
+    _context: _Context | None = field(repr=False, default=None)
+
+    def _key(self, candidate: str | Iterable[Any]) -> str:
+        return candidate if isinstance(candidate, str) else _candidate_key(candidate)
+
+    def _row(self, key: str, duration: int) -> dict[str, Any] | None:
+        full = self.ranking if self._unfiltered is None else self._unfiltered
+        rows = full.filter((pl.col("candidate") == key) & (pl.col("duration") == duration))
+        return rows.row(0, named=True) if rows.height else None
+
+    def _require_context(self) -> _Context:
+        if self._context is None:
+            raise ValueError("this DesignRanking was not built by rank_designs; nothing to plot")
+        return self._context
+
+    def fit_path(self, candidate: str | Iterable[Any], duration: int) -> pl.DataFrame:
+        """Actual vs synthetic outcome for one design, as a frame.
+
+        Fits a **copy** of the prototype estimator --- the one passed to
+        :func:`rank_designs` is never mutated --- with the simulated test in the
+        last ``duration`` periods of the panel, the most recent of the
+        windows the power simulation evaluated.
+
+        Parameters
+        ----------
+        candidate : str or iterable of object
+            Canonical key or the original treated set.
+        duration : int
+            An evaluated duration.
+
+        Returns
+        -------
+        polars.DataFrame
+            ``[time, actual, synthetic, gap, window]``, one row per period;
+            ``window`` is ``"pre"`` or ``"test"``.
+
+        Raises
+        ------
+        KeyError, ValueError
+            As :meth:`power`, or if the ranking has no fitting context.
+        TypeError
+            If the estimator does not expose ``periods_``, ``actual_`` and
+            ``synthetic_`` after fitting (``Synth`` and ``AugSynth`` do).
+        """
+        self.power(candidate, duration)
+        ctx = self._require_context()
+        key = self._key(candidate)
+        periods = ctx.panel.get_column(ctx.time).unique().sort()
+        model = copy.deepcopy(ctx.estimator).fit(
+            ctx.panel,
+            unit=ctx.unit,
+            time=ctx.time,
+            outcome=ctx.outcome,
+            treated=list(self.candidates[key]),
+            treatment_time=periods[-duration],
+        )
+        missing = [a for a in ("periods_", "actual_", "synthetic_") if not hasattr(model, a)]
+        if missing:
+            raise TypeError(
+                f"{type(model).__name__} does not expose {missing} after fit; fit_path "
+                "needs the fitted actual and synthetic paths"
+            )
+        actual = np.asarray(getattr(model, "actual_"), dtype=np.float64)  # noqa: B009
+        synthetic = np.asarray(getattr(model, "synthetic_"), dtype=np.float64)  # noqa: B009
+        if len(actual) != periods.len():
+            raise ValueError("fitted path length does not match the panel's periods")
+        return pl.DataFrame(
+            {
+                ctx.time: periods,
+                "actual": actual,
+                "synthetic": synthetic,
+                "gap": actual - synthetic,
+                "window": np.where(np.asarray(model.pre_mask_), "pre", "test"),
+            }
+        )
+
+    def plot_power(
+        self,
+        candidate: str | Iterable[Any],
+        *,
+        durations: Sequence[int] | None = None,
+        ax: Axes | None = None,
+    ) -> Axes:
+        """Plot power against effect size, one line per duration.
+
+        Requires the ``plot`` extra (matplotlib). A dot on each line marks the
+        interpolated ``mde`` at the target power.
+
+        Parameters
+        ----------
+        candidate : str or iterable of object
+            Canonical key or the original treated set.
+        durations : sequence of int, optional
+            Durations to draw; all evaluated ones by default (at most eight).
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on; a new figure otherwise.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        key = self._key(candidate)
+        if key not in self._results:
+            raise KeyError(f"no results for candidate {key!r}")
+        results = self._results[key]
+        evaluated = list(results.params.durations) if results.params is not None else []
+        chosen = evaluated if durations is None else list(durations)
+        for d in chosen:
+            self.power(key, d)
+        ctx = self._require_context()
+        mdes = {d: (row or {}).get("mde") for d in chosen for row in [self._row(key, d)]}
+        return _plotting.power(
+            results.power_curve(alpha=ctx.alpha),
+            durations=chosen,
+            mdes=mdes,
+            target_power=ctx.target_power,
+            title=key,
+            ax=ax,
+        )
+
+    def plot_fit(
+        self, candidate: str | Iterable[Any], duration: int, *, ax: Axes | None = None
+    ) -> Axes:
+        """Plot actual vs synthetic outcome, with the test window shaded.
+
+        Requires the ``plot`` extra (matplotlib). The data is
+        :meth:`fit_path`.
+
+        Parameters
+        ----------
+        candidate : str or iterable of object
+            Canonical key or the original treated set.
+        duration : int
+            An evaluated duration.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on; a new figure otherwise.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        key = self._key(candidate)
+        path = self.fit_path(key, duration)
+        ctx = self._require_context()
+        row = self._row(key, duration)
+        return _plotting.fit(
+            path,
+            time=ctx.time,
+            outcome=ctx.outcome,
+            rmspe_pre=None if row is None else row.get("rmspe_pre"),
+            title=f"{key}, {duration} periods",
+            ax=ax,
+        )
+
+    def within_budget(self, budget: float) -> DesignRanking:
+        """Keep the designs whose cost at their own MDE fits ``budget``.
+
+        Cost is ``investment_mde`` --- ``cpic x mde_grid x sum(Y_treated)``, which
+        is R GeoLift's ``Investment``. Because ``mde_grid >= mde``, it is an upper
+        bound: a design that passes can afford the lift it is able to detect.
+        Designs with no MDE on the evaluated grid are dropped.
+
+        Filters from the unfiltered ranking, so a budget can be loosened as well
+        as tightened without recomputing anything. Survivors are re-ranked.
+
+        Parameters
+        ----------
+        budget : float
+            Maximum spend, in the currency of ``cpic``.
+
+        Returns
+        -------
+        DesignRanking
+            A new result; the power results stay reachable for every candidate.
+
+        Raises
+        ------
+        ValueError
+            If the ranking was built without ``cpic``, or ``budget`` is not a
+            finite, non-negative number.
+
+        Warns
+        -----
+        UserWarning
+            If no design fits, naming the cheapest cost available.
+        """
+        if not (math.isfinite(budget) and budget >= 0):
+            raise ValueError(f"budget must be a finite, non-negative number; got {budget!r}")
+        full = self.ranking if self._unfiltered is None else self._unfiltered
+        if "investment_mde" not in full.columns:
+            raise ValueError("within_budget needs a ranking built with cpic")
+        kept = full.filter(pl.col("investment_mde") <= budget)
+        if not kept.height:
+            cheapest = full.get_column("investment_mde").min()
+            warnings.warn(
+                f"no design fits budget={budget:g}; the cheapest investment_mde is "
+                f"{cheapest if cheapest is None else format(cheapest, 'g')}",
+                UserWarning,
+                stacklevel=2,
+            )
+        return replace(
+            self,
+            ranking=_apply_ranking(kept.drop("rank")),
+            budget=budget,
+            _unfiltered=full,
+        )
 
     def power(self, candidate: str | Iterable[Any], duration: int) -> PowerResults:
         """Return the power results behind one candidate.
@@ -233,7 +461,7 @@ class DesignRanking:
         ValueError
             If ``duration`` was not among the evaluated durations.
         """
-        key = candidate if isinstance(candidate, str) else _candidate_key(candidate)
+        key = self._key(candidate)
         if key not in self._results:
             raise KeyError(f"no results for candidate {key!r}")
         results = self._results[key]
@@ -256,6 +484,7 @@ def rank_designs(
     target_power: float = 0.8,
     target_effect_size: float = 0.10,
     cpic: float | None = None,
+    budget: float | None = None,
     n_jobs: int = 1,
     effect_sizes: Sequence[float] = DEFAULT_EFFECT_SIZES,
     effect_type: EffectType = "multiplicative",
@@ -296,7 +525,12 @@ def rank_designs(
         Effect size reported in ``power_at_target``. Need not be on the grid.
     cpic : float, optional
         Cost per incremental conversion. When given, an ``investment`` column
-        is added; when omitted, no cost is reported rather than assumed.
+        is added (cost at ``target_effect_size``), plus ``investment_mde`` (cost
+        at the design's own ``mde_grid``); when omitted, no cost is reported
+        rather than assumed.
+    budget : float, optional
+        Keep only designs whose ``investment_mde`` fits; survivors are
+        re-ranked. Requires ``cpic``. See :meth:`DesignRanking.within_budget`.
     n_jobs : int, default 1
         Parallelism **across candidates**. ``n_jobs=1`` is always passed down to
         ``simulate_power`` — joblib does not nest workers.
@@ -309,8 +543,8 @@ def rank_designs(
     Raises
     ------
     ValueError
-        If two candidates collide on the canonical key, or ``candidates`` is
-        empty.
+        If two candidates collide on the canonical key, ``candidates`` is
+        empty, or ``budget`` is given without ``cpic``.
 
     Notes
     -----
@@ -325,6 +559,8 @@ def rank_designs(
     """
     if not candidates:
         raise ValueError("candidates must not be empty")
+    if budget is not None and cpic is None:
+        raise ValueError("budget needs cpic: the cost of a design is cpic x mde_grid x sum(Y)")
     keys = _candidate_keys(candidates)
     members = [tuple(c) for c in candidates]
     duration_list = [durations] if isinstance(durations, int) else list(durations)
@@ -382,15 +618,26 @@ def rank_designs(
             alpha=alpha,
             effect_type=effect_type,
             cpic=cpic,
+            lookback_window=lookback_window,
         )
         for key, treated in zip(keys, members, strict=True)
         for duration in duration_list
     ]
-    return DesignRanking(
+    ranked = DesignRanking(
         ranking=_apply_ranking(pl.DataFrame(rows, schema=_ranking_schema(cpic))),
         candidates=dict(zip(keys, members, strict=True)),
         _results=results,
+        _context=_Context(
+            panel=panel,
+            estimator=estimator,
+            unit=unit,
+            time=time,
+            outcome=outcome,
+            target_power=target_power,
+            alpha=alpha,
+        ),
     )
+    return ranked if budget is None else ranked.within_budget(budget)
 
 
 def _ranking_schema(cpic: float | None) -> dict[str, Any]:
@@ -411,6 +658,7 @@ def _ranking_schema(cpic: float | None) -> dict[str, Any]:
     }
     if cpic is not None:
         schema["investment"] = pl.Float64
+        schema["investment_mde"] = pl.Float64
     return schema
 
 
@@ -454,6 +702,46 @@ def _calibration_error(
     return None if recovered is None else abs(recovered - grid_mde)
 
 
+def _lookback_treated_y(
+    panel: pl.DataFrame,
+    periods: pl.Series,
+    *,
+    unit: str,
+    time: str,
+    outcome: str,
+    treated: tuple[Any, ...],
+    duration: int,
+    lookback_window: int,
+) -> float:
+    """Treated outcome per test window, averaged over the lookback windows.
+
+    The cost basis of ``investment`` and ``investment_mde``: the simulated test
+    windows end at the last period, the one before, and so on for
+    ``lookback_window`` windows, and a design is priced at their mean. This is
+    R GeoLift's ``Investment`` exactly --- measured to the cent, see the
+    characterization doc; with ``lookback_window = 1`` it reduces to the last
+    window.
+    """
+    per_period = (
+        panel.filter(pl.col(unit).is_in(list(treated))).group_by(time).agg(pl.col(outcome).sum())
+    )
+    series = (
+        pl.DataFrame({time: periods})
+        .join(per_period, on=time, how="left")
+        .get_column(outcome)
+        .fill_null(0.0)
+        .to_numpy()
+        .astype(float)
+    )
+    n = len(series)
+    sums = [
+        series[n - k - duration : n - k].sum()
+        for k in range(lookback_window)
+        if n - k - duration >= 0
+    ]
+    return float(np.mean(sums)) if sums else 0.0
+
+
 def _summarize(
     *,
     key: str,
@@ -469,6 +757,7 @@ def _summarize(
     alpha: float,
     effect_type: EffectType,
     cpic: float | None,
+    lookback_window: int,
 ) -> dict[str, Any]:
     """Reduce one candidate x duration cell to a ranking row."""
     curve = (
@@ -480,7 +769,9 @@ def _summarize(
     # Treated share of the outcome over the treatment window (the last
     # `duration` periods). GeoLift reports a near-identical quantity under a
     # slightly different window convention; see the characterization doc.
-    window = panel.filter(pl.col(time) > pl.col(time).max() - duration)
+    # Counted in distinct periods, not time arithmetic, so dates work too.
+    periods = panel.get_column(time).unique().sort()
+    window = panel.filter(pl.col(time).is_in(periods.tail(duration).to_list()))
     totals = window.select(
         total=pl.col(outcome).sum(),
         treated=pl.col(outcome).filter(pl.col(unit).is_in(list(treated))).sum(),
@@ -508,7 +799,18 @@ def _summarize(
         "holdout": None if share is None else 1.0 - share,
     }
     if cpic is not None:
-        row["investment"] = cpic * target_effect_size * treated_y
+        priced_y = _lookback_treated_y(
+            panel,
+            periods,
+            unit=unit,
+            time=time,
+            outcome=outcome,
+            treated=treated,
+            duration=duration,
+            lookback_window=lookback_window,
+        )
+        row["investment"] = cpic * target_effect_size * priced_y
+        row["investment_mde"] = None if grid_mde is None else cpic * grid_mde * priced_y
     return row
 
 

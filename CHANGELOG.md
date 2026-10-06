@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 Project milestone v0.5+ (release line 0.2.x), per
 `docs/design-2026-09-25-0.2-api.md`.
 
@@ -133,5 +135,6 @@ proposing, measuring and writing.
   PyPI trusted publishing), and placeholder `selection` module. No public
   API yet — that lands with the v0.5 design doc.
 
-[Unreleased]: https://github.com/mrcsvg/geoexp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mrcsvg/geoexp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mrcsvg/geoexp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mrcsvg/geoexp/releases/tag/v0.1.0

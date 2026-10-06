@@ -55,7 +55,7 @@ res.power("chicago, portland", 15)  # the underlying augsynth_py.PowerResults
 `res.ranking` carries `candidate`, `duration`, `n_units`, `mde`, `mde_grid`,
 `power_at_target`, `empirical_size`, `rmspe_pre`, `null_bias`,
 `h1_calibration_error`, `proportion_total_y`, `holdout`, `rank`, and
-`investment` when `cpic` is given.
+`investment` and `investment_mde` when `cpic` is given.
 
 Two things worth knowing before you read the output:
 
@@ -69,11 +69,60 @@ Two things worth knowing before you read the output:
   well-behaved panels; they separate only when the estimator's bias depends on
   the effect size.
 
+## From a raw export to a design
+
+```python
+import geoexp_units  # optional companion: ready-made hierarchies
+import numpy as np
+from augsynth_py import AugSynth
+
+from geoexp import aggregate_panel, prepare_panel, rank_designs
+
+panel = prepare_panel(  # GeoDataRead-compatible, but says what it drops
+    raw,
+    unit="municipio",
+    time="date",
+    outcome="sales",
+    date_format="%Y-%m-%d",
+    every="1w",  # daily export -> whole weeks
+)
+panel = aggregate_panel(  # municipalities -> states
+    panel,
+    unit="municipio",
+    time="date",
+    outcome="sales",
+    hierarchy=geoexp_units.br.ibge(),
+    to="uf",
+    use_labels=True,
+)
+res = rank_designs(
+    panel,
+    estimator=AugSynth(lambda_=1.0),
+    unit="uf",
+    time="date",
+    outcome="sales",
+    candidates=candidates,
+    durations=[4, 8],
+    lookback_window=10,
+    cpic=12.0,
+    budget=50_000,  # keep designs whose cost at their MDE fits
+    rng=np.random.default_rng(7),
+)
+res.within_budget(80_000)  # try another budget without recomputing
+res.plot_power("PR, SC")  # needs: pip install 'geoexp[plot]'
+res.plot_fit("PR, SC", 8)  # actual vs synthetic, test window shaded
+```
+
+A design's cost is `investment_mde = cpic × mde_grid × Σ Y_treated` — exactly
+R GeoLift's `Investment` — and it is an upper bound, so a design that fits the
+budget can afford the lift it can detect. See
+[`docs/methodology.md`](docs/methodology.md).
+
 ## Scope
 
-0.1.x is single-cell market selection: candidate enumeration by similarity,
-power-based ranking, and cost per incremental conversion. Budget-constrained
-selection is 0.2.x; multi-cell designs are 0.3.x+.
+0.2.x is single-cell design: candidate enumeration, power-based ranking,
+budget-constrained selection, panel preparation, aggregation along unit
+hierarchies, and design plots. Multi-cell designs are 0.3.x+.
 
 `enumerate_candidates` is a convenience, not a gate — `rank_designs` takes any
 list of sets, so bring your own candidates if you prefer.
@@ -137,7 +186,9 @@ held throughout: the R GeoLift source was never read.
 ## Install
 
 ```bash
-pip install geoexp
+pip install geoexp            # core
+pip install 'geoexp[plot]'    # + plot_power / plot_fit (matplotlib)
+pip install geoexp-units      # + ready-made hierarchies (IBGE first)
 ```
 
 Requires `augsynth-py>=0.5.0` (the release that froze the power-API contract

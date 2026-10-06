@@ -9,11 +9,16 @@ The public API is fixed by docs/design-2026-09-05-v0.5-api.md.
 """
 
 from geoexp._version import __version__
+from geoexp.hierarchy import Hierarchy, aggregate_panel
+from geoexp.panel import prepare_panel
 from geoexp.selection import DesignRanking, enumerate_candidates, rank_designs
 
 __all__ = [
     "DesignRanking",
+    "Hierarchy",
     "__version__",
+    "aggregate_panel",
     "enumerate_candidates",
+    "prepare_panel",
     "rank_designs",
 ]

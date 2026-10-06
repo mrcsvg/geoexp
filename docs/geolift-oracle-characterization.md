@@ -46,10 +46,15 @@ gl <- GeoDataRead(GeoLift_PreTest, date_id = "date", location_id = "location",
 ```
 
 **Consequence for the parity suite:** take the converted panel *from R* and
-hand the identical frame to both sides. geoexp must not reimplement
-`GeoDataRead` — that would be exactly the translation the clean-room rule
-forbids, and it would also make the test compare two preprocessing steps
-instead of the ranking logic under test.
+hand the identical frame to both sides, so a ranking test compares the ranking
+logic and not two preprocessing steps.
+
+*Corrected 2026-09-25.* This paragraph used to say geoexp "must not
+reimplement `GeoDataRead`". That rule protects the parity *harness*, which
+still takes R's converted panel. It does not bar the package from offering its
+own preparation step: `prepare_panel` implements the behaviour measured in
+[§10](#10-geodataread-measured-2026-09-25) from outputs, which is not
+translating source, and it has its own parity test.
 
 ## 3. Call surface used
 
@@ -77,7 +82,8 @@ Argument correspondence with `augsynth_py.simulate_power`:
 | `side_of_test` | `side` | `"two_sided"` vs `"two-sided"` — underscore vs hyphen |
 | `model = "none"` | `Synth()` | augmentation off on both sides |
 | `N`, `include_markets`, `exclude_markets` | — | **candidate enumeration; no augsynth-py counterpart** |
-| `cpic`, `budget`, `holdout` | — | budget layer, deferred past 0.1.0 |
+| `cpic`, `budget` | `cpic`, `budget` (geoexp 0.2.0) | see [§11](#11-budget-measured-2026-09-25) |
+| `holdout` | — | not implemented |
 | `fixed_effects`, `dtw`, `Correlations`, `normalize` | — | GeoLift-specific |
 
 Two defaults worth pinning explicitly in every parity call:
@@ -145,6 +151,11 @@ only; nothing the ranking depends on.
   treated window sum is 108465, and GeoLift reports 5423.25 at
   `effect_size = 0.05` (= 0.05 × 108465) and 27116.25 at 0.25. It is a
   function of the panel and the grid alone — no estimator internals.
+  **Amended 2026-09-25:** that measurement used `lookback_window = 1`. In
+  general the treated sum is **averaged over the lookback windows** (test
+  windows ending at T, T-1, …, T-L+1): at L = 10 the same candidate is priced
+  at 0.1 × 109751.1 = 10975.11, exact to the cent. geoexp 0.1.0 priced the
+  last window only, which agreed at L = 1 and nowhere else; fixed in 0.2.0.
 - **Power is a rate over the lookback window.** With `lookback_window = 1`
   there is exactly one test, so `power ∈ {0, 1}` — as observed (27 markets
   at 0, 3 at 1). augsynth-py behaves identically (`n_simulations = 1`). Any
@@ -184,13 +195,26 @@ only; nothing the ranking depends on.
 | `PowerCurves.power` | `power_curve().power` | **1:1** — 226/240 cells exact, the rest within one lookback step at the decision boundary (§7.2) |
 | `PowerCurves.AvgATT` | `simulations.att` | **1:1**, ~1e-6 relative |
 | `PowerCurves.EffectSize`, `duration` | `effect_size`, `duration` | 1:1 by construction |
-| `BestMarkets.Investment` | derived from panel | 1:1, formula in §5 |
+| `BestMarkets.Investment` | `investment_mde` (at `mde_grid`) | **1:1**, formula in §5; asserted in `test_budget.py` |
+| `BestMarkets` after `budget` | `rank_designs(budget=)` | **same kept set** where the grid MDEs agree (§11) |
+| `GeoDataRead` | `prepare_panel(time_index=True)` | **1:1**, frame equality (§10) |
 | `BestMarkets.Holdout`, `ProportionTotal_Y` | derived from panel | derivable; window convention to pin |
 | `PowerCurves.AvgDetectedLift` | `simulations.att_pct` | **affine, not equal** — constant ratio 1.02125 for the probed candidate; different denominators |
 | `AvgScaledL2Imbalance` | `rmspe_pre` | **not comparable** — different metric |
 | `Average_MDE` | `mde()` | **not comparable** — off-grid, definition unavailable |
 | `abs_lift_in_zero` | — | **not comparable** — definition unavailable |
 | `rank` | — | **not comparable** — composite unavailable |
+
+**geoexp features with no oracle counterpart** (maintainer decision recorded in
+`docs/design-2026-09-25-0.2-api.md`; unit-tested, and described in
+`docs/methodology.md`):
+
+| geoexp feature | Why no parity test |
+|---|---|
+| `prepare_panel(every=...)` | `GeoDataRead` has no temporal aggregation |
+| `prepare_panel(on_incomplete="fill_zero")` | `GeoDataRead` only drops |
+| `Hierarchy`, `aggregate_panel` | GeoLift has no unit hierarchy |
+| `fit_path`, `plot_power`, `plot_fit` | presentation; the numbers they draw are the parity-tested power curves and augsynth-py's fitted paths |
 
 ## 7. Measured parity
 
@@ -363,3 +387,51 @@ should be built on ranking agreement. This also closes the question of
 whether GeoLift's source would help: even an exact copy of its formula would
 be chasing a number that is unstable by construction. Nothing is lost by not
 reading it.
+
+## 10. `GeoDataRead`, measured 2026-09-25
+
+Black-box probe: `GeoLift_PreTest` with four injected defects, through
+`GeoDataRead(format = "yyyy-mm-dd")` (GeoLift 2.7.5).
+
+| Defect injected | Observed |
+|---|---|
+| `"atlanta"` renamed `"Atlanta"` | lower-cased back to `"atlanta"` |
+| One chicago row duplicated | **summed** (4336 × 2 = 8672; 2610 + 1 = 2611 in a second probe) |
+| One boston date removed | **boston dropped entirely** |
+| One denver `Y` set to `NA` | **denver dropped entirely** |
+
+Dates become an integer `time` 1..T. There is no temporal aggregation
+argument (`period` is rejected). Drops are reported only in the optional
+summary ("Final Number of Locations (Complete): 38").
+
+geoexp's `prepare_panel` reproduces this, warning where GeoLift is silent, and
+adds `every` (temporal aggregation) and `on_incomplete="fill_zero"`, which
+have no counterpart here and are therefore unit-tested only.
+
+## 11. Budget, measured 2026-09-25
+
+Same call as §3 with `N = c(2)`, with and without `budget`.
+
+- `BestMarkets.EffectSize` is the smallest grid effect whose power reaches
+  0.8 — geoexp's `mde_grid` — and `Investment` is priced at it (§5).
+- `budget = b` keeps the rows with `Investment <= b` and **re-ranks** them
+  1..n: 15 of 30 kept at `b` = the median investment.
+- **The oracle is not deterministic between identical calls.** Two runs
+  without `budget` differed in 3 of 180 `PowerCurves` cells, all at the
+  decision boundary, with identical `AvgATT`. An apparent effect of `budget`
+  on the curves (one candidate moving from `EffectSize` 0.10 to 0.05) is that
+  noise, not semantics.
+
+Parity at `lookback_window = 10`, `ns = 200`, seed 7 on the geoexp side: the
+two grid MDEs coincide on **27 of 30** candidates; on those, `investment_mde`
+equals `Investment` to `rtol = 1e-9` and the kept/dropped decision is
+identical, with 15 kept on each side. The three that differ sit a grid step
+apart at the power boundary, the same noise §7.3 measures.
+
+**A partial finding on `Average_MDE`.** For the three candidates probed
+(lookback 1), `Average_MDE` equals `PowerCurves.AvgDetectedLift` at the row's
+`EffectSize` to every printed digit (e.g. 0.1085321 for
+`{las vegas, saint paul}`). That would explain both oddities in §5 — off-grid
+values and a negative one — since it is a *detected lift*, not a detectable
+effect. Three candidates is not an established definition, and it does not
+make geoexp's interpolated `mde` comparable: `Average_MDE` stays excluded.

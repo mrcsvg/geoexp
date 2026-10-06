@@ -8,12 +8,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Project milestone v0.5+ (release line 0.2.x), per
+`docs/design-2026-09-25-0.2-api.md`.
+
+### Added
+
+- **Budget-constrained selection.** `rank_designs(..., budget=)` keeps the
+  designs whose cost at their own MDE fits, and re-ranks them. The cost is the
+  new `investment_mde` column, `cpic × mde_grid × Σ Y_treated` — exactly R
+  GeoLift's `Investment`, asserted in `tests/validation_against_r/test_budget.py`
+  (27 of 30 candidates share a grid MDE with the oracle; on those, cost agrees
+  to 1e-9 and the kept set is identical). `DesignRanking.within_budget()`
+  re-applies another budget, tighter or looser, without recomputing.
+- **`prepare_panel`**: from a raw export to a balanced long panel. Reproduces
+  R `GeoDataRead` (lower-cased names, duplicates summed, incomplete units
+  dropped — frame equality in `tests/validation_against_r/test_panel.py`), but
+  warns with each dropped unit and the reason, keeps real dates by default,
+  and adds temporal aggregation (`every=`) and `on_incomplete="fill_zero"`.
+- **`Hierarchy` and `aggregate_panel`**: roll a panel up a unit hierarchy
+  (municipality → state, store → district). Non-nesting hierarchies are
+  allowed; an aggregation direction that would double-count is refused.
+  Ready-made hierarchies ship in the new companion package `geoexp-units`.
+- **Design plots**, behind the new optional extra `geoexp[plot]` (matplotlib,
+  imported lazily): `DesignRanking.plot_power()` and `plot_fit()`, plus
+  `fit_path()`, which returns the numbers behind `plot_fit` without matplotlib.
+- `HierarchyError` in `geoexp.exceptions`.
+
+### Fixed
+
+- **`investment` was priced at the last test window only.** GeoLift averages
+  the treated outcome over the lookback windows; the two agree only at
+  `lookback_window = 1`, which is the only setting 0.1.0 had verified. Both
+  `investment` and the new `investment_mde` now average over the lookback
+  windows. Expect different `investment` values for `lookback_window > 1`.
+- `rank_designs` assumed an integer time column when locating the treatment
+  window (`time > max(time) - duration`); it now counts the last `duration`
+  distinct periods, so date columns work.
+
 ### Changed
 
 - Docs: the README and `docs/methodology.md` now state that `unit` is any
   panel unit and that "market" and `cpic` are vocabulary inherited from R
   GeoLift, with the prospective/retrospective boundary against augsynth-py
-  spelled out. No code change.
+  spelled out.
+- `docs/geolift-oracle-characterization.md`: new §10 (`GeoDataRead`) and §11
+  (budget) measurements; §2 no longer says geoexp must not reimplement
+  `GeoDataRead` (that rule protects the parity harness, which is unchanged);
+  §5 amended for lookback-averaged `Investment`; new exclusions listed in §6.
+  Records that the oracle is not deterministic between identical calls, and a
+  partial, unestablished observation about `Average_MDE`.
+
+### How Claude was used
+
+This release was built in one session with Claude Code (Anthropic's coding
+agent, model Claude Opus 5.5), with the maintainer deciding and Claude
+proposing, measuring and writing.
+
+- **Decided by the maintainer**, each asked explicitly and recorded in the
+  design doc: the scope of the release; matplotlib as an *optional* extra;
+  pricing the budget at `mde_grid`; dropping over-budget designs *and* offering
+  `within_budget`; dropping incomplete units with a warning; shipping
+  hierarchies as a separate package, and its name `geoexp-units`. The
+  maintainer approved the design section by section before any code was
+  written, and keeps commits, pull requests and releases to themselves.
+- **Measured by Claude**, as a black box, against R GeoLift 2.7.5 via Rscript
+  and rpy2: the semantics of `budget`, the behaviour of `GeoDataRead`, the
+  oracle's run-to-run non-determinism, and the lookback-averaged
+  `Investment` — which exposed the 0.1.0 pricing bug above. The GeoLift source
+  was not read.
+- **Written by Claude**: the code, the tests (test-first, each seen failing
+  before its implementation), the parity tests, the docs and this entry. Along
+  the way the declared dependency floors were exercised in a throwaway
+  environment, which caught a Polars 1.0 incompatibility before CI would have.
+- **What that does not guarantee**: the parity figures are from single runs
+  on one marketing fixture; the plots were checked by eye on synthetic data
+  only.
 
 ## [0.1.0] - 2026-09-20
 

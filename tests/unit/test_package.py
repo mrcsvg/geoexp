@@ -35,3 +35,10 @@ def test_augsynth_public_contract_is_importable() -> None:
     assert len(DEFAULT_EFFECT_SIZES) == 6
     for obj in (AugSynth, Synth, PowerEstimator, PowerParams, PowerResults):
         assert obj is not None
+
+
+def test_rank_stability_is_exported() -> None:
+    import geoexp
+
+    assert "RankStability" in geoexp.__all__
+    assert geoexp.RankStability is geoexp.selection.RankStability

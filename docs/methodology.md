@@ -21,6 +21,8 @@ never translated.
 | Candidate enumeration | correlation criterion, see below | `enumerate_candidates` |
 | Null bias / H1 calibration | see below | `selection._summarize` |
 | Budget-constrained selection | GeoLift's `budget`, measured (characterization §11) | `rank_designs(budget=)`, `DesignRanking.within_budget` |
+| Seed replicates | geoexp construct, see below | `rank_designs(replicates=)`, `selection._pool_results` |
+| Ranking stability | paired bootstrap over placebo windows, see below | `DesignRanking.stability`, `selection._bootstrap_ranking` |
 | Panel preparation | GeoLift's `GeoDataRead`, measured (characterization §10) | `prepare_panel` |
 | Unit hierarchies | geoexp construct, see below | `Hierarchy`, `aggregate_panel` |
 | Design plots | presentation of the above | `DesignRanking.fit_path`, `plot_power`, `plot_fit` |
@@ -74,6 +76,10 @@ geoexp therefore interpolates. From the power curve it drops the
 effect), enforces monotonicity by running maximum (simulated power curves dip),
 and interpolates linearly to the first crossing of `target_power`. When the
 curve never reaches the target it returns null — never an extrapolated number.
+A cell whose power is unknown (every simulation failed under
+`on_error="record"`) is skipped, as `PowerResults.mde` skips it: the crossing
+is interpolated between the evaluated neighbours, and a curve with no
+evaluated cell has no MDE.
 `mde_grid` carries the unmodified upstream grid point alongside, so the strict
 answer is always one column away.
 
@@ -213,6 +219,69 @@ parity-tested power curves; `plot_fit` draws `fit_path`. Colours come from a
 fixed categorical order checked for colour-vision-deficiency separation, and
 every series is also named in a legend.
 
+## Ranking stability
+
+A ranking row rests on little evidence. `power` for one cell is the share of
+`lookback_window` placebo tests that detected the injected effect — ten
+Bernoulli trials at the setting used throughout this repository — and `mde`
+is an interpolation across six such cells. The characterization (§9) measured
+what that implies: geoexp and R GeoLift agree on 226 of 240 power cells and
+still order candidates at Kendall τ ≈ 0.40. A point ranking reported to three
+decimals overstates what the simulation knows.
+
+Two sources of randomness feed a row. **Which placebo windows** were in the
+lookback moves the power rate itself, in steps of `1/lookback_window`.
+**Monte Carlo noise** in the conformal p-value (`ns` permutations) flips cells
+whose p-value sits near `alpha`; §7.3 measured it as small (225 of 240 cells
+identical between seeds). `rank_designs(replicates=k)` addresses the second by
+running `simulate_power` `k` times per candidate, each with its own child
+generator, and pooling the runs into one `PowerResults` (a `replicate` column
+tags the rows). Every ranking column is then a rate or mean over
+`k × lookback_window` simulations: a better estimate of the same quantity, not
+the same number. Pooling re-draws the permutations for the *same* windows, so
+it sharpens cells at the decision boundary and cannot add windows.
+
+`DesignRanking.stability()` measures both sources with one mechanism: a
+**paired bootstrap** over the pooled `(replicate, window)` evidence. Each draw
+samples `replicates × lookback_window` placebo tests with replacement and
+applies the **same indices to every design** — every candidate ran the same
+calendar windows, so a window with a shock that hurts every synthetic control
+hurts every design in the same draw; unpaired draws would manufacture
+disagreement the data does not contain. From the resampled rows it recomputes
+exactly the ranking keys — `mde` (by the same interpolation), `empirical_size`
+and `rmspe_pre` — and ranks the draw with the production rule
+(`_apply_ranking`, grouped by draw). No model is refit, so the method is cheap
+enough to call always. The result carries, per design, a rank interval
+(`rank_low`, `rank_high`), the share of draws ranked at or above `top`
+(`p_top`), the share where the curve never reached target power
+(`p_undetectable`), and an MDE interval (`mde_low`, `mde_high`, null when more
+than `1 − level` of the draws have no MDE).
+
+**What it measures, and what it does not.**
+
+- It measures how much the ranking depends on which placebo tests and which
+  permutation draws produced it — the two sources of randomness between
+  `rank_designs` and its own inputs.
+- It does **not** measure sampling variability of the panel (the pre-period
+  is one realization and is never resampled), model misspecification, or the
+  choice of estimator, grid, `alpha` or `permutation_type`. Those are the
+  caller's design choices; a band that contained them would be a different,
+  much larger object.
+- **Windows overlap.** Consecutive placebo windows share `duration − 1`
+  periods, so the pool is serially dependent and a bootstrap over it
+  understates the variance. The intervals are therefore **optimistic**: a
+  design whose band already overlaps another's is tied at least that much. A
+  block bootstrap would be the usual remedy; with ten windows it has nothing
+  to work with, so none is offered. Read the output as a stability diagnostic,
+  not as a confidence interval.
+- It is **not comparable to anything in GeoLift**, which returns a point
+  ranking. No parity test exists or can exist; the characterization §12
+  records the measurement that stands in for one.
+
+Two designs whose rank intervals overlap are not distinguished by the
+evidence. Report the robust set — `stab.frame.filter(pl.col("p_top") >= 0.9)`
+— rather than the winner.
+
 ## Ranking criteria
 
 Default order: `mde` ascending, then `empirical_size`, then `rmspe_pre`, then
@@ -244,6 +313,8 @@ covered by unit tests rather than parity tests.
 | `prepare_panel(every=, on_incomplete="fill_zero")` | `GeoDataRead` has no counterpart |
 | `Hierarchy`, `aggregate_panel` | GeoLift has no unit hierarchy |
 | `fit_path`, `plot_power`, `plot_fit` | Presentation of quantities validated elsewhere |
+| `rank_designs(replicates=)` | GeoLift runs one simulation per cell |
+| `DesignRanking.stability` | GeoLift returns a point ranking; nothing to compare against (characterization §12 records a measurement instead) |
 
 Every other public column is either asserted against the oracle
 (`power`, `att`, `investment_mde`, the budget filter, `prepare_panel`) or is

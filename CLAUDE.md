@@ -65,7 +65,8 @@ exclusion should be rejected.
 |---|---|---|
 | v0.5 | 0.1.x | Single-cell market selection, candidate enumeration, cpic |
 | v0.5+ | 0.2.x | Budget-constrained selection |
-| v0.6 | 0.3.x+ | Multi-cell designs |
+| v0.5+ | 0.3.x | Ranking stability, seed replicates |
+| v0.6 | 0.4.x+ | Multi-cell designs |
 
 augsynth-py's own releases number independently; geoexp's dependency floor
 is `augsynth-py>=0.5.0` (the release that froze the power-API contract —

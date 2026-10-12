@@ -215,6 +215,8 @@ only; nothing the ranking depends on.
 | `prepare_panel(on_incomplete="fill_zero")` | `GeoDataRead` only drops |
 | `Hierarchy`, `aggregate_panel` | GeoLift has no unit hierarchy |
 | `fit_path`, `plot_power`, `plot_fit` | presentation; the numbers they draw are the parity-tested power curves and augsynth-py's fitted paths |
+| `rank_designs(replicates=)` | GeoLift runs one simulation per cell; pooling replicates has no counterpart |
+| `DesignRanking.stability` | GeoLift returns a point ranking; nothing to compare against. §12 records a measurement in place of a parity test |
 
 ## 7. Measured parity
 
@@ -435,3 +437,63 @@ apart at the power boundary, the same noise §7.3 measures.
 values and a negative one — since it is a *detected lift*, not a detectable
 effect. Three candidates is not an established definition, and it does not
 make geoexp's interpolated `mde` comparable: `Average_MDE` stays excluded.
+
+## 12. Ranking stability, measured 2026-10-08
+
+`DesignRanking.stability()` has no oracle counterpart (§6), so this section
+records a measurement in place of a parity test. Setup as in §7: the
+`GeoDataRead` panel taken from R, the 40 single-unit candidates, `Synth()`,
+duration 15, `lookback_window = 10`, the six-point grid, `ns = 200`,
+`alpha = 0.1`, iid permutations, seed 7; then
+`stability(rng=default_rng(0), n_draws=500, level=0.9, top=3)`.
+Wall time: the 40 fits in 4.7 s with `n_jobs=-1`; `stability` in 0.12 s —
+cheap enough to recommend always.
+
+**Rank intervals.** Width `rank_high − rank_low` over the 40 designs: min 0,
+quartiles 2 and 4, median 3, max 24. The maximum is a design near the
+"never reaches target power" boundary (the one design with
+`p_undetectable > 0`), whose rank swings between the middle and last. Two
+designs have `p_top ≥ 0.9`; nine have `p_top > 0`; one has `rank_low = 1`.
+The top of the point ranking reads:
+
+| candidate | rank | band | `p_top` | MDE band |
+|---|---|---|---|---|
+| milwaukee | 1 | 1–7 | 0.944 | 0.050–0.067 |
+| kansas city | 2 | 2–2 | 1.000 | 0.050–0.050 |
+| austin | 3 | 3–6 | 0.460 | 0.050–0.050 |
+| philadelphia | 4 | 3–7 | 0.284 | 0.050–0.067 |
+| oklahoma city | 5 | 3–7 | 0.126 | 0.050–0.050 |
+
+Positions 3 to 7 are one block: the evidence does not separate them. That is
+what the point ranking hides and what the feature exists to show.
+
+**Within-geoexp agreement is high — and does not explain §9.** Kendall τ
+between the point ranking and each bootstrap draw's ranking: median 0.944,
+5–95 % range 0.892–0.982. The τ between the seed-7 and seed-99 point
+rankings is 0.931 (the two runs agree on 225 of 240 power cells, as §7.3).
+The design doc anticipated that a within-geoexp τ near the cross-implementation
+0.40 of §9 would explain that number as evidence-base noise. **It does not**:
+geoexp disagrees with its own resampled evidence at τ ≈ 0.94 and with GeoLift
+at τ ≈ 0.40. The cross-implementation disagreement is therefore in the
+*derivation* of the scalar, not in the simulation noise — consistent with the
+§11 partial finding that GeoLift's `Average_MDE` is a detected lift rather
+than a detectable effect. Nothing here makes the two rankings comparable; it
+sharpens why they are not.
+
+**Coverage, crude.** 31 of 40 seed-99 point ranks fall inside the seed-7
+90 % band — 78 % where a calibrated interval would give about 90 %. Two
+reasons, both expected: the placebo windows overlap, so the bootstrap
+understates variance (the methodology says the bands are optimistic), and at
+`replicates = 1` the seed dimension is not in the pool at all, while the
+check varies exactly that. Not a test — coverage over 40 designs is itself
+noisy — but a number to repeat if the mechanism changes.
+
+**Consequence for the defaults.** Re-running `stability` at `n_draws = 500`
+with bootstrap seeds 0, 1 and 2 on the same fit: the 5 / 50 / 95 % quantiles
+of τ are 0.892 / 0.944 / 0.982, 0.882 / 0.941 / 0.982 and
+0.879 / 0.938 / 0.982 — within 0.013; the band edges of the top five move by
+at most one position (milwaukee 1–7, 1–8, 1–7; kansas city 2–2, 1–2, 1–2)
+and `p_top` by at most 0.05; the median width (3) and the count of designs
+with `p_top ≥ 0.9` (2) do not change. The bootstrap's own Monte Carlo noise
+is a fraction of the width it reports, so the defaults stand. A caller who
+needs band edges stable to the position should raise `n_draws`.

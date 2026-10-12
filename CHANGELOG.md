@@ -8,6 +8,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-11
+
+Project milestone v0.5+ (release line 0.3.x), per
+`docs/design-2026-10-08-ranking-uncertainty.md`. Multi-cell designs, which
+the version map had pencilled in as 0.3.x, move to 0.4.x+.
+
+### Added
+
+- **Ranking stability.** `DesignRanking.stability(rng=, n_draws=500,
+  level=0.9, top=3)` returns a `RankStability` whose frame carries, per
+  design, a rank interval (`rank_low`, `rank_high`), the share of bootstrap
+  draws ranked at or above `top` (`p_top`), the share where the power curve
+  never reached target power (`p_undetectable`), and an MDE interval
+  (`mde_low`, `mde_high`). One paired bootstrap over the simulated
+  `(replicate, window)` evidence — the same resampled placebo tests for every
+  design — re-ranked per draw with the production rule; no model is refit.
+  The motivation is measured: geoexp and R GeoLift agree on 226 of 240 power
+  cells and still order candidates at Kendall τ ≈ 0.40, so a point ranking
+  overstates what ten placebo tests know. It is **not** a confidence
+  interval: placebo windows overlap, so the bands are optimistic; and nothing
+  in GeoLift compares, so it is excluded from the parity rule
+  (characterization §6) and measured instead (§12). See
+  `docs/methodology.md`, "Ranking stability".
+- **Seed replicates.** `rank_designs(..., replicates=k)` runs
+  `simulate_power` `k` times per candidate, each with its own child
+  generator, and pools the runs into one `PowerResults` (a `replicate`
+  column tags the rows; `res.power()` returns the pool). Every ranking
+  column is then a rate or mean over `k × lookback_window` simulations — a
+  better estimate of the same quantity, not the same number. Pooling
+  re-draws permutations for the same windows, so it sharpens the decision
+  boundary and cannot add windows. Default `1`, which is the previous
+  behaviour; the only visible change at the default is the `replicate`
+  column on `simulations`.
+- `RankStability` exported from `geoexp`.
+
+### Fixed
+
+- **An all-failed cell read as the best possible MDE.** Under
+  `on_error="record"`, a cell where every simulation failed has null power;
+  `_interp_mde` turned that null into NaN and returned the *smallest* grid
+  effect, so a design whose curve was unknown ranked as if it were the most
+  sensitive. Unknown cells are now skipped, as `PowerResults.mde` skips them,
+  and a curve with no evaluated cell has no MDE. Pre-existing in 0.1.0 and
+  0.2.0; found in the code review of this release because the stability
+  bootstrap makes the path far more reachable (a draw can resample only the
+  failed rows of a cell). Only rankings built with `on_error="record"` and at
+  least one failed cell are affected.
+
+### Changed
+
+- `_apply_ranking` takes a `by=` grouping so the bootstrap ranks every draw
+  with the same rule that produces `ranking`. Internal; no behaviour change.
+
+### How Claude was used
+
+This release was built with Claude Code (Anthropic's coding agent, model
+Claude Fable 5.1), with the maintainer deciding and Claude proposing,
+measuring and writing.
+
+- **Decided by the maintainer**, each asked explicitly and recorded in the
+  design doc: the feature itself, chosen over pre-registered design records
+  and spillover neighbours as the package's differentiator; covering both
+  noise sources (placebo windows and permutation seed) rather than one;
+  pooling replicates into the point estimates; the names and defaults; the
+  two parity exclusions. The design was accepted before any code was
+  written; the maintainer keeps commits, pull requests and releases.
+- **Measured by Claude** on `GeoLift_PreTest` (characterization §12): the
+  rank intervals (median width 3 of 40 positions; positions 3–7 one block),
+  the Kendall τ between the point ranking and its own bootstrap draws
+  (median 0.94), and a crude coverage check at a second seed (31 of 40
+  inside a 90 % band). The τ result contradicted the design's hypothesis —
+  the within-geoexp noise does *not* explain the 0.40 measured against
+  GeoLift in §9 — and is recorded as found. Not asserted, because τ and
+  coverage are themselves noisy.
+- **Written by Claude**: the code, the tests (test-first, each seen failing
+  before its implementation; the stability tests use hand-built p-values so
+  their expectations are exact), the docs and this entry.
+- **What that does not guarantee**: the intervals are optimistic under
+  window overlap, by construction; the measurement is from single runs on
+  one marketing fixture.
+
+
 ## [0.2.0] - 2026-10-05
 
 Project milestone v0.5+ (release line 0.2.x), per
@@ -135,6 +217,7 @@ proposing, measuring and writing.
   PyPI trusted publishing), and placeholder `selection` module. No public
   API yet — that lands with the v0.5 design doc.
 
-[Unreleased]: https://github.com/mrcsvg/geoexp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mrcsvg/geoexp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mrcsvg/geoexp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mrcsvg/geoexp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mrcsvg/geoexp/releases/tag/v0.1.0

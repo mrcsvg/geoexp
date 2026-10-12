@@ -50,6 +50,8 @@ res = rank_designs(
 
 res.ranking  # one row per candidate x duration, best first
 res.power("chicago, portland", 15)  # the underlying augsynth_py.PowerResults
+stab = res.stability(rng=np.random.default_rng(11))  # paired bootstrap, no refit
+stab.frame.filter(pl.col("p_top") >= 0.9)  # the designs that are robustly top-3
 ```
 
 `res.ranking` carries `candidate`, `duration`, `n_units`, `mde`, `mde_grid`,
@@ -63,7 +65,10 @@ Two things worth knowing before you read the output:
   grid value leaves most candidates tied. It is a geoexp construct and is not
   R GeoLift's `Average_MDE`. `mde_grid` carries the upstream grid point.
 - **Rank order by `mde` is stable within an implementation, not across them.**
-  Small differences near ties carry no information. See
+  Small differences near ties carry no information. `res.stability()` turns
+  that caveat into numbers: a rank interval, `p_top` and an MDE interval per
+  design, from the placebo tests already simulated. Its intervals are
+  optimistic, because placebo windows overlap. See
   [`docs/methodology.md`](docs/methodology.md).
 - **`null_bias` and `h1_calibration_error` are near-duplicates** on
   well-behaved panels; they separate only when the estimator's bias depends on
@@ -120,9 +125,10 @@ budget can afford the lift it can detect. See
 
 ## Scope
 
-0.2.x is single-cell design: candidate enumeration, power-based ranking,
+0.3.x is single-cell design: candidate enumeration, power-based ranking,
 budget-constrained selection, panel preparation, aggregation along unit
-hierarchies, and design plots. Multi-cell designs are 0.3.x+.
+hierarchies, design plots, and ranking stability. Multi-cell designs are
+0.4.x+.
 
 `enumerate_candidates` is a convenience, not a gate — `rank_designs` takes any
 list of sets, so bring your own candidates if you prefer.

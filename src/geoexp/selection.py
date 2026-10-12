@@ -112,7 +112,7 @@ def _candidate_keys(candidates: Sequence[Iterable[Any]]) -> list[str]:
 
 def _interp_mde(
     effect_sizes: Sequence[float],
-    powers: Sequence[float],
+    powers: Sequence[float | None],
     *,
     target_power: float,
 ) -> float | None:
@@ -124,15 +124,19 @@ def _interp_mde(
     R GeoLift's ``Average_MDE`` — see ``docs/methodology.md``.
 
     Rows at ``effect_size == 0`` are dropped: that row is the empirical size,
-    not a detectable effect. The curve is monotonized by running maximum before
+    not a detectable effect. Rows whose power is ``None`` --- every simulation
+    in the cell failed under ``on_error="record"`` --- are dropped too: they
+    carry no evidence, and reading them as a number would turn an unknown
+    cell into the smallest grid effect. ``PowerResults.mde`` skips them the
+    same way. The curve is monotonized by running maximum before
     interpolating, because simulated power curves dip.
 
     Parameters
     ----------
     effect_sizes : sequence of float
         Grid of effect sizes, ascending.
-    powers : sequence of float
-        Power at each effect size.
+    powers : sequence of float or None
+        Power at each effect size; ``None`` where it is unknown.
     target_power : float
         Power the design must reach.
 
@@ -142,7 +146,9 @@ def _interp_mde(
         The interpolated crossing, or ``None`` if the curve never reaches
         ``target_power`` on the evaluated grid. Never extrapolated.
     """
-    pairs = sorted((e, p) for e, p in zip(effect_sizes, powers, strict=True) if e > 0)
+    pairs = sorted(
+        (e, p) for e, p in zip(effect_sizes, powers, strict=True) if e > 0 and p is not None
+    )
     if not pairs:
         return None
     xs = np.asarray([e for e, _ in pairs], dtype=float)
@@ -164,7 +170,7 @@ def _interp_mde(
 _RANK_KEYS = ("mde", "empirical_size", "rmspe_pre")
 
 
-def _apply_ranking(ranking: pl.DataFrame) -> pl.DataFrame:
+def _apply_ranking(ranking: pl.DataFrame, *, by: Sequence[str] = ()) -> pl.DataFrame:
     """Sort a ranking frame and attach a competition rank.
 
     Ordering is ``mde`` ascending, then ``empirical_size`` ascending, then
@@ -181,6 +187,9 @@ def _apply_ranking(ranking: pl.DataFrame) -> pl.DataFrame:
     ----------
     ranking : polars.DataFrame
         Must carry ``candidate`` and the columns in :data:`_RANK_KEYS`.
+    by : sequence of str, optional
+        Group columns; the rank restarts at 1 inside each group. The
+        stability bootstrap uses it to rank every draw with this same rule.
 
     Returns
     -------
@@ -189,12 +198,14 @@ def _apply_ranking(ranking: pl.DataFrame) -> pl.DataFrame:
         criterion share a rank and consume the positions they span, matching
         the oracle's competition ranking.
     """
-    ordered = ranking.sort([*_RANK_KEYS, "candidate"], nulls_last=True)
-    return (
-        ordered.with_row_index("_pos", offset=1)
-        .with_columns(pl.col("_pos").min().over(_RANK_KEYS).cast(pl.Int64).alias("rank"))
-        .drop("_pos")
-    )
+    group = list(by)
+    ordered = ranking.sort([*group, *_RANK_KEYS, "candidate"], nulls_last=True)
+    positioned = ordered.with_row_index("_pos", offset=1)
+    if group:
+        positioned = positioned.with_columns(pl.col("_pos") - pl.col("_pos").min().over(group) + 1)
+    return positioned.with_columns(
+        pl.col("_pos").min().over([*group, *_RANK_KEYS]).cast(pl.Int64).alias("rank")
+    ).drop("_pos")
 
 
 @dataclass(frozen=True)
@@ -208,6 +219,46 @@ class _Context:
     outcome: str
     target_power: float
     alpha: float
+
+
+@dataclass(frozen=True)
+class RankStability:
+    """How much a ranking depends on the placebo tests that produced it.
+
+    Returned by :meth:`DesignRanking.stability`. One paired bootstrap over the
+    simulated ``(replicate, window)`` evidence, re-ranked per draw with the
+    production rule. See ``docs/methodology.md`` for what it measures and
+    what it does not: the intervals are optimistic, because consecutive
+    placebo windows overlap.
+
+    Attributes
+    ----------
+    frame : polars.DataFrame
+        One row per row of the ranking it was built from, same order:
+        ``candidate``, ``duration``, ``rank`` (the point ranking),
+        ``rank_low`` / ``rank_high`` (quantiles of the rank across draws at
+        ``level``), ``p_top`` (share of draws ranked ``<= top``),
+        ``p_undetectable`` (share of draws where the curve never reached
+        target power), ``mde_low`` / ``mde_high`` (quantiles of the
+        interpolated MDE over the draws where it exists; null when more than
+        ``1 - level`` of the draws have none). Both intervals use the
+        nearest-rank quantile, so every endpoint is a value some draw actually
+        produced; nothing is interpolated between draws.
+    n_draws : int
+        Bootstrap draws taken.
+    level : float
+        Coverage of the rank and MDE intervals.
+    top : int
+        The position ``p_top`` is measured against.
+    pool_size : int
+        ``replicates x lookback_window`` --- the evidence resampled per draw.
+    """
+
+    frame: pl.DataFrame
+    n_draws: int
+    level: float
+    top: int
+    pool_size: int
 
 
 @dataclass(frozen=True)
@@ -241,7 +292,9 @@ class DesignRanking:
 
     def _require_context(self) -> _Context:
         if self._context is None:
-            raise ValueError("this DesignRanking was not built by rank_designs; nothing to plot")
+            raise ValueError(
+                "this DesignRanking was not built by rank_designs; it carries no simulation results"
+            )
         return self._context
 
     def fit_path(self, candidate: str | Iterable[Any], duration: int) -> pl.DataFrame:
@@ -470,6 +523,109 @@ class DesignRanking:
             raise ValueError(f"duration {duration} was not evaluated; got {list(durations)}")
         return results
 
+    def stability(
+        self,
+        *,
+        rng: np.random.Generator,
+        n_draws: int = 500,
+        level: float = 0.90,
+        top: int = 3,
+    ) -> RankStability:
+        """Rank intervals from a paired bootstrap over the simulated evidence.
+
+        Each draw resamples the ``replicates x lookback_window`` placebo tests
+        with replacement --- the same indices for every design, so a calendar
+        window that hurts every synthetic control hurts every design in the
+        same draw --- recomputes ``mde``, ``empirical_size`` and ``rmspe_pre``
+        from the resampled rows, and ranks the draw with the rule that produced
+        :attr:`ranking`. No model is refit.
+
+        The designs ranked are those in :attr:`ranking`; a ``budget`` is not
+        re-applied per draw. What the result measures, and what it does not,
+        is in ``docs/methodology.md``: in particular the intervals are
+        optimistic, because consecutive placebo windows overlap.
+
+        Parameters
+        ----------
+        rng : numpy.random.Generator
+            Required, no default.
+        n_draws : int, default 500
+            Bootstrap draws.
+        level : float, default 0.90
+            Coverage of the rank and MDE intervals.
+        top : int, default 3
+            ``p_top`` is the share of draws in which the design ranks at or
+            above this position.
+
+        Returns
+        -------
+        RankStability
+
+        Raises
+        ------
+        ValueError
+            Bad arguments; a ranking not built by :func:`rank_designs`; a pool
+            of one window (``lookback_window=1`` with ``replicates=1``).
+
+        Warns
+        -----
+        UserWarning
+            When the pool has fewer than 10 placebo tests.
+        """
+        if n_draws < 1:
+            raise ValueError(f"n_draws must be >= 1, got {n_draws}")
+        if not 0.0 < level < 1.0:
+            raise ValueError(f"level must be in (0, 1), got {level}")
+        if top < 1:
+            raise ValueError(f"top must be >= 1, got {top}")
+        context = self._require_context()
+        if not self.ranking.height:
+            raise ValueError("the ranking has no designs to resample (did a budget drop them all?)")
+        pool, pool_size = _simulation_pool(self.ranking, self._results, alpha=context.alpha)
+        if pool_size < 2:
+            raise ValueError(
+                "stability needs more than one window to resample: increase "
+                "lookback_window or replicates"
+            )
+        if pool_size < 10:
+            warnings.warn(
+                f"the simulation pool has {pool_size} placebo tests; the bootstrap is "
+                "coarse on a small pool. Increase lookback_window or replicates.",
+                UserWarning,
+                stacklevel=2,
+            )
+        draws = _bootstrap_ranking(
+            pool,
+            pool_size=pool_size,
+            n_draws=n_draws,
+            rng=rng,
+            target_power=context.target_power,
+        )
+        lo, hi = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+        defined = pl.col("p_undetectable") <= 1.0 - level
+        summary = (
+            draws.group_by(["candidate", "duration"])
+            .agg(
+                rank_low=pl.col("rank").quantile(lo, interpolation="nearest").cast(pl.Int64),
+                rank_high=pl.col("rank").quantile(hi, interpolation="nearest").cast(pl.Int64),
+                p_top=(pl.col("rank") <= top).mean(),
+                p_undetectable=pl.col("mde").is_null().mean(),
+                mde_low=pl.col("mde").drop_nulls().quantile(lo, interpolation="nearest"),
+                mde_high=pl.col("mde").drop_nulls().quantile(hi, interpolation="nearest"),
+            )
+            .with_columns(pl.when(defined).then(pl.col("mde_low", "mde_high")))
+        )
+        frame = (
+            self.ranking.select("candidate", "duration", "rank")
+            .with_row_index("_i")
+            .join(summary, on=["candidate", "duration"], how="left")
+            .sort("_i")
+            .drop("_i")
+        )
+        return RankStability(
+            frame=frame, n_draws=n_draws, level=level, top=top, pool_size=pool_size
+        )
+
 
 def rank_designs(
     panel: pl.DataFrame,
@@ -486,6 +642,7 @@ def rank_designs(
     cpic: float | None = None,
     budget: float | None = None,
     n_jobs: int = 1,
+    replicates: int = 1,
     effect_sizes: Sequence[float] = DEFAULT_EFFECT_SIZES,
     effect_type: EffectType = "multiplicative",
     lookback_window: int = 1,
@@ -534,6 +691,15 @@ def rank_designs(
     n_jobs : int, default 1
         Parallelism **across candidates**. ``n_jobs=1`` is always passed down to
         ``simulate_power`` — joblib does not nest workers.
+    replicates : int, default 1
+        Independent ``simulate_power`` runs per candidate, each with its own
+        child generator, pooled into one ``PowerResults`` (a ``replicate``
+        column tags the rows). Every ranking column is then a rate or mean
+        over ``replicates x lookback_window`` simulations: a row at
+        ``replicates=3`` is a better estimate of the same quantity, not the
+        same number. Pooling re-draws the permutations for the *same* placebo
+        windows, so it sharpens cells near the decision boundary and cannot
+        add windows; see :meth:`DesignRanking.stability`.
 
     Returns
     -------
@@ -544,7 +710,7 @@ def rank_designs(
     ------
     ValueError
         If two candidates collide on the canonical key, ``candidates`` is
-        empty, or ``budget`` is given without ``cpic``.
+        empty, ``budget`` is given without ``cpic``, or ``replicates < 1``.
 
     Notes
     -----
@@ -561,6 +727,8 @@ def rank_designs(
         raise ValueError("candidates must not be empty")
     if budget is not None and cpic is None:
         raise ValueError("budget needs cpic: the cost of a design is cpic x mde_grid x sum(Y)")
+    if replicates < 1:
+        raise ValueError(f"replicates must be >= 1, got {replicates}")
     keys = _candidate_keys(candidates)
     members = [tuple(c) for c in candidates]
     duration_list = [durations] if isinstance(durations, int) else list(durations)
@@ -574,7 +742,7 @@ def rank_designs(
             stacklevel=2,
         )
 
-    children = rng.spawn(len(keys))
+    children = rng.spawn(len(keys) * replicates)
 
     def _one(treated: tuple[Any, ...], child: np.random.Generator) -> PowerResults:
         return simulate_power(
@@ -598,10 +766,14 @@ def rank_designs(
             on_error=on_error,
         )
 
+    tasks = [member for member in members for _ in range(replicates)]
     computed: list[PowerResults] = Parallel(n_jobs=n_jobs)(
-        delayed(_one)(m, c) for m, c in zip(members, children, strict=True)
+        delayed(_one)(m, c) for m, c in zip(tasks, children, strict=True)
     )
-    results = dict(zip(keys, computed, strict=True))
+    results = {
+        key: _pool_results(computed[i * replicates : (i + 1) * replicates])
+        for i, key in enumerate(keys)
+    }
 
     rows = [
         _summarize(
@@ -660,6 +832,146 @@ def _ranking_schema(cpic: float | None) -> dict[str, Any]:
         schema["investment"] = pl.Float64
         schema["investment_mde"] = pl.Float64
     return schema
+
+
+def _pool_results(runs: Sequence[PowerResults]) -> PowerResults:
+    """Concatenate replicate runs of one candidate into one ``PowerResults``.
+
+    Rows get a ``replicate`` column; ``power_curve`` and ``mde`` group by
+    duration and effect size and so read the pool as one larger sample.
+    Rebuilding ``PowerResults`` from a ``simulations`` frame is a documented
+    use of augsynth-py's public API; ``params`` is shared, since only the
+    generator differed between runs.
+    """
+    first = runs[0]
+    frames = [
+        run.simulations.with_columns(pl.lit(i, dtype=pl.Int64).alias("replicate"))
+        for i, run in enumerate(runs)
+    ]
+    return PowerResults(
+        simulations=pl.concat(frames),
+        alpha=first.alpha,
+        effect_type=first.effect_type,
+        params=first.params,
+    )
+
+
+def _simulation_pool(
+    ranking: pl.DataFrame, results: dict[str, PowerResults], *, alpha: float
+) -> tuple[pl.DataFrame, int]:
+    """Long frame of every simulation behind the ranked designs, pool-indexed.
+
+    One row per ``(candidate, duration, effect_size, pool_idx)``, where
+    ``pool_idx`` enumerates the distinct ``(replicate, window)`` pairs ---
+    shared across candidates, which is what makes the bootstrap paired.
+    ``detected`` is null for a failed simulation (``on_error="record"``), so
+    it drops out of the denominator exactly as in ``PowerResults.power_curve``.
+    """
+    designs = ranking.select("candidate", "duration")
+    frames = []
+    for key, run in results.items():
+        sims = run.simulations
+        if "replicate" not in sims.columns:
+            sims = sims.with_columns(pl.lit(0, dtype=pl.Int64).alias("replicate"))
+        frames.append(
+            sims.select(
+                pl.lit(key).alias("candidate"),
+                pl.col("duration").cast(pl.Int64),
+                "effect_size",
+                pl.col("replicate").cast(pl.Int64),
+                pl.col("window").cast(pl.Int64),
+                detected=pl.col("pvalue") <= alpha,
+                rmspe_pre=pl.col("rmspe_pre").cast(pl.Float64),
+            )
+        )
+    long = pl.concat(frames).join(designs, on=["candidate", "duration"], how="semi")
+    pairs = (
+        long.select("replicate", "window")
+        .unique()
+        .sort(["replicate", "window"])
+        .with_row_index("pool_idx")
+        .with_columns(pl.col("pool_idx").cast(pl.Int64))
+    )
+    pool = long.join(pairs, on=["replicate", "window"]).drop("replicate", "window")
+    per_cell = pool.group_by(["candidate", "duration", "effect_size"]).len().get_column("len")
+    if (per_cell != pairs.height).any():
+        raise ValueError("designs were simulated on different placebo windows; cannot pair draws")
+    return pool, pairs.height
+
+
+def _bootstrap_ranking(
+    pool: pl.DataFrame,
+    *,
+    pool_size: int,
+    n_draws: int,
+    rng: np.random.Generator,
+    target_power: float,
+) -> pl.DataFrame:
+    """Rank every design in every draw; one row per ``(draw, candidate, duration)``.
+
+    A draw is a multinomial count over the pool --- sampling ``pool_size``
+    placebo tests with replacement --- applied as weights to every design, so
+    the curves, the interpolated MDE and the rank are recomputed from the same
+    resampled evidence for all of them.
+    """
+    counts = rng.multinomial(pool_size, np.full(pool_size, 1.0 / pool_size), size=n_draws)
+    weights = pl.DataFrame(
+        {
+            "draw": np.repeat(np.arange(n_draws), pool_size).astype(np.int64),
+            "pool_idx": np.tile(np.arange(pool_size), n_draws).astype(np.int64),
+            "w": counts.ravel().astype(np.int64),
+        }
+    ).filter(pl.col("w") > 0)
+    return _rank_weighted_draws(weights, pool, target_power=target_power)
+
+
+def _rank_weighted_draws(
+    weights: pl.DataFrame, pool: pl.DataFrame, *, target_power: float
+) -> pl.DataFrame:
+    """Recompute the ranking keys and the rank for every weighted draw.
+
+    ``weights`` has one row per ``(draw, pool_idx)`` with a positive integer
+    ``w``. A draw with every weight equal to one is the point ranking: the
+    columns here are, by construction, the quantities ``_summarize`` reports
+    --- a test asserts it.
+    """
+    w = pl.col("w")
+    cells = (
+        pool.join(weights, on="pool_idx")
+        .group_by(["draw", "candidate", "duration", "effect_size"])
+        .agg(
+            n_detected=(w * pl.col("detected").cast(pl.Int64)).sum(),
+            n_valid=w.filter(pl.col("detected").is_not_null()).sum(),
+            rmspe_w=(w * pl.col("rmspe_pre")).sum(),
+            rmspe_n=w.filter(pl.col("rmspe_pre").is_not_null()).sum().cast(pl.Float64),
+        )
+        .with_columns(
+            power=pl.when(pl.col("n_valid") > 0)
+            .then(pl.col("n_detected") / pl.col("n_valid"))
+            .otherwise(None)
+        )
+        .sort(["draw", "candidate", "duration", "effect_size"])
+    )
+    per_design = cells.group_by(["draw", "candidate", "duration"], maintain_order=True).agg(
+        effect_sizes=pl.col("effect_size"),
+        powers=pl.col("power"),
+        empirical_size=pl.col("power").filter(pl.col("effect_size") == 0.0).first(),
+        rmspe_pre=pl.when(pl.col("rmspe_n").sum() > 0)
+        .then(pl.col("rmspe_w").sum() / pl.col("rmspe_n").sum())
+        .otherwise(None),
+    )
+    mdes = [
+        _interp_mde(effects, powers, target_power=target_power)
+        for effects, powers in zip(
+            per_design.get_column("effect_sizes").to_list(),
+            per_design.get_column("powers").to_list(),
+            strict=True,
+        )
+    ]
+    draws = per_design.drop("effect_sizes", "powers").with_columns(
+        pl.Series("mde", mdes, dtype=pl.Float64)
+    )
+    return _apply_ranking(draws, by=("draw",))
 
 
 def _power_at(curve: pl.DataFrame, effect_size: float) -> float | None:

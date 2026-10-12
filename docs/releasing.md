@@ -52,4 +52,5 @@ OIDC (trusted publishing).
 
 Semantic versioning with the 0.x caveat: minor bumps may break the API;
 patch bumps must not. See the version map in `CLAUDE.md` for how geoexp
-releases track the project milestones (v0.5 → 0.1.x, v0.6 → 0.3.x+).
+releases track the project milestones (v0.5 → 0.1.x, v0.5+ → 0.2.x and
+0.3.x, v0.6 → 0.4.x+).
